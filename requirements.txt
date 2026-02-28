@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pandas
+langdetect
+sentence-transformers
+transformers
+torch
+pytest
+python-multipart
+# Add other dependencies as needed later (e.g., faiss-cpu, bertopic)
