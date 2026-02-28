@@ -16,3 +16,4 @@ redis
 umap-learn
 fpdf2
 praw
+slack_sdk

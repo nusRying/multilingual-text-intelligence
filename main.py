@@ -8,8 +8,9 @@ from src.models.search import SemanticSearchService
 from src.models.embeddings import EmbeddingGenerator
 from src.models.ner import NERAnalyzer
 from src.models.emotion import EmotionAnalyzer
-
 from src.models.classification import ZeroShotClassifier
+from src.utils.monitor import monitor
+import time
 
 app = FastAPI(title="Multilingual Text Intelligence System")
 
@@ -55,6 +56,7 @@ async def root():
 
 @app.post("/analyze", response_model=TextResponse)
 async def analyze_text(request: TextRequest):
+    start_time = time.time()
     try:
         # 1. Clean and detect language
         cleaning_result = cleaner.clean(request.text)
@@ -75,6 +77,10 @@ async def analyze_text(request: TextRequest):
         # 6. Ingest into vector store for search availability
         emb = embedding_gen.generate(cleaning_result['cleaned'])
         vector_store.add(emb, [{"id": "dynamic", "text": request.text}])
+        
+        # Log latency
+        duration = (time.time() - start_time) * 1000
+        monitor.log_inference("API: analyze_text", duration, len(request.text), lang)
         
         return {
             "original": request.text,

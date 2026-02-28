@@ -8,6 +8,7 @@ from fpdf import FPDF
 from src.ingestion.mock_api_connector import MockSocialMediaConnector
 from src.ingestion.reddit_connector import RedditConnector
 from src.ingestion.web_scraper import WebScraper
+from src.ingestion.slack_connector import SlackConnector
 from src.preprocessing.cleaner import TextCleaner
 from src.models.sentiment import SentimentAnalyzer
 from src.models.topics import TopicEngine
@@ -17,6 +18,10 @@ from src.models.search import SemanticSearchService
 from src.models.emotion import EmotionAnalyzer
 from src.models.ner import NERAnalyzer
 from src.models.classification import ZeroShotClassifier
+from src.utils.alert_engine import AlertEngine
+from src.utils.notifications import NotificationHub
+from src.utils.monitor import monitor
+import time
 
 st.set_page_config(page_title="Multilingual Text Intelligence", layout="wide")
 
@@ -31,20 +36,29 @@ def load_components():
     vector_store = LocalVectorStore(dimension=384)
     search_service = SemanticSearchService(embedding_gen, vector_store)
     topic_engine = TopicEngine()
-    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine
+    alert_engine = AlertEngine()
+    notification_hub = NotificationHub()
+    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub
 
-cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine = load_components()
+cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub = load_components()
 
 st.title("🌍 Multilingual Text Intelligence System")
 st.markdown("**English + Arabic | Transformer-Based NLP | Real-time Insights**")
 
 # Sidebar for controls
 st.sidebar.header("Data Ingestion")
-data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "Reddit Live", "Web Scraper", "CSV Upload"])
+data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "Reddit Live", "Slack (Internal)", "Web Scraper", "CSV Upload"])
 
 st.sidebar.header("Classification Settings")
 custom_labels = st.sidebar.text_input("Custom Labels (comma-separated)", "Policy, Technology, Economics, Social")
 labels = [l.strip() for l in custom_labels.split(",") if l.strip()]
+
+st.sidebar.header("🚨 Alert Settings")
+alert_threshold = st.sidebar.slider("Negative Sentiment Threshold (%)", 10, 100, 35)
+alert_engine.threshold = alert_threshold / 100
+enable_slack = st.sidebar.checkbox("Notify via Slack (Mock)")
+if enable_slack: notification_hub.enable_channel("slack")
+else: notification_hub.disable_channel("slack")
 
 texts_df = pd.DataFrame()
 
@@ -74,6 +88,15 @@ elif data_source == "Web Scraper":
             st.sidebar.warning("Failed to scrape URL or no content found.")
         else:
             texts_df = pd.DataFrame(data)
+elif data_source == "Slack (Internal)":
+    channel = st.sidebar.text_input("Slack Channel ID", "C12345")
+    if st.sidebar.button("Fetch Slack Messages"):
+        connector = SlackConnector()
+        if not connector.client:
+            st.sidebar.error("SLACK_BOT_TOKEN not found in .env!")
+        else:
+            data = connector.fetch_data(channel_id=channel)
+            texts_df = pd.DataFrame(data)
 else:
     uploaded_file = st.sidebar.file_path_input("Choose a CSV file") # Note: streamlit doesn't have file_path_input, using file_uploader
     # uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
@@ -90,14 +113,17 @@ if not texts_df.empty:
         # 1. Full Pipeline Processing
         results = []
         for text in texts_df['text']:
+            start_time = time.time()
             clean_res = cleaner.clean(text)
             lang = clean_res['language']
             sent_res = sentiment_analyzer.analyze(clean_res['cleaned'], language=lang)[0]
             emo_res = emotion_analyzer.analyze(clean_res['cleaned'])[0]
             ner_res = ner_analyzer.extract_entities(clean_res['cleaned'])[0]
-            
-            # 4. Zero-Shot classification
             class_res = classification_engine.classify(clean_res['cleaned'], labels)
+            
+            # Log latency
+            duration = (time.time() - start_time) * 1000
+            monitor.log_inference("Full Pipeline", duration, len(text), lang)
             
             # Simple entity list for display
             ents = [f"{e['word']} ({e['entity_group']})" for e in ner_res]
@@ -124,6 +150,19 @@ if not texts_df.empty:
             
         # 3. Topic Modeling
         topic_results = topic_engine.fit_transform(proc_df['cleaned'].tolist())
+        
+        # 4. Check for Alert Spikes
+        active_alert = alert_engine.check_for_spikes(proc_df, topic=keyword if data_source != "Web Scraper" else "Web Content")
+        if active_alert:
+            notification_hub.notify(active_alert)
+
+    # Alert Center
+    if alert_engine.get_history():
+        st.header("🔔 Alert Center")
+        for alert in reversed(alert_engine.get_history()[-5:]): # Show last 5
+            severity_color = "red" if alert['severity'] == "CRITICAL" else "orange"
+            st.markdown(f":{severity_color}[**{alert['severity']}**] | **{alert['topic']}** | {alert['message']} ({alert['timestamp'][:16]})")
+        st.divider()
         
     # Visualizations
     col1, col2, col3 = st.columns(3)
@@ -224,6 +263,20 @@ if not texts_df.empty:
         st.write("Top Results:")
         for r in search_res:
             st.info(f"**Text:** {r['text']}  \n**Similarity Distance:** {r['distance']:.4f}")
+
+    # Infrastructure & MLOps View
+    st.divider()
+    with st.expander("🛠 Infrastructure & MLOps Health"):
+        stats = monitor.get_summary()
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Avg Latency", f"{stats['avg_latency_ms']:.2f}ms")
+        col_m2.metric("Total Requests", stats['total_calls'])
+        col_m3.metric("Supported Languages", len(stats.get('languages', [])))
+        
+        if monitor.metrics_history:
+            m_df = pd.DataFrame(monitor.metrics_history)
+            fig_lat = px.line(m_df, y='latency_ms', title="Inference Latency Over Time (ms)")
+            st.plotly_chart(fig_lat, use_container_width=True)
 
 else:
     st.info("👈 Fetch data from the sidebar to begin analysis.")
