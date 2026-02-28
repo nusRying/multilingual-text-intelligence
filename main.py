@@ -9,6 +9,8 @@ from src.models.embeddings import EmbeddingGenerator
 from src.models.ner import NERAnalyzer
 from src.models.emotion import EmotionAnalyzer
 from src.models.classification import ZeroShotClassifier
+from src.models.summarizer import TextSummarizer
+from src.models.comparator import TextComparator
 from src.utils.monitor import monitor
 import time
 
@@ -20,6 +22,8 @@ sentiment_analyzer = SentimentAnalyzer()
 ner_analyzer = NERAnalyzer()
 emotion_analyzer = EmotionAnalyzer()
 classification_engine = ZeroShotClassifier()
+summarizer = TextSummarizer()
+comparator = TextComparator(embedding_gen)
 embedding_gen = EmbeddingGenerator()
 # For demonstration, we use a fixed dimension (384 for MiniLM-L12-v2)
 vector_store = LocalVectorStore(dimension=384)
@@ -128,3 +132,30 @@ async def search_documents(request: SearchRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+# --- Additional Endpoints ---
+
+class SummarizeRequest(BaseModel):
+    text: str
+    max_length: int = 150
+
+class CompareRequest(BaseModel):
+    text_a: str
+    text_b: str
+
+@app.post("/summarize")
+async def summarize_text(request: SummarizeRequest):
+    try:
+        result = summarizer.summarize(request.text, max_length=request.max_length)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/compare")
+async def compare_texts(request: CompareRequest):
+    try:
+        result = comparator.compare(request.text_a, request.text_b)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

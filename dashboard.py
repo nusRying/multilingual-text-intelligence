@@ -21,6 +21,8 @@ from src.models.classification import ZeroShotClassifier
 from src.utils.alert_engine import AlertEngine
 from src.utils.notifications import NotificationHub
 from src.utils.monitor import monitor
+from src.models.summarizer import TextSummarizer
+from src.models.comparator import TextComparator
 import time
 
 st.set_page_config(page_title="Multilingual Text Intelligence", layout="wide")
@@ -38,9 +40,11 @@ def load_components():
     topic_engine = TopicEngine()
     alert_engine = AlertEngine()
     notification_hub = NotificationHub()
-    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub
+    summarizer = TextSummarizer()
+    comparator = TextComparator(embedding_gen)
+    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub, summarizer, comparator
 
-cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub = load_components()
+cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine, alert_engine, notification_hub, summarizer, comparator = load_components()
 
 st.title("🌍 Multilingual Text Intelligence System")
 st.markdown("**English + Arabic | Transformer-Based NLP | Real-time Insights**")
@@ -263,6 +267,40 @@ if not texts_df.empty:
         st.write("Top Results:")
         for r in search_res:
             st.info(f"**Text:** {r['text']}  \n**Similarity Distance:** {r['distance']:.4f}")
+
+    # Executive Summary
+    st.divider()
+    st.subheader("📝 Executive Summary")
+    if st.button("Generate AI Summary"):
+        with st.spinner("Generating summary..."):
+            executive_summary = summarizer.summarize_batch(proc_df['cleaned'].tolist())
+            st.success(executive_summary)
+
+    # Duplicate Detection
+    st.subheader("🔍 Near-Duplicate Detection")
+    if st.button("Scan for Duplicates"):
+        with st.spinner("Scanning for near-duplicates..."):
+            dupes = comparator.find_duplicates(proc_df['cleaned'].tolist(), threshold=0.85)
+            if dupes:
+                st.warning(f"Found {len(dupes)} near-duplicate pair(s)!")
+                for d in dupes:
+                    st.markdown(f"- **Texts {d['index_a']+1} & {d['index_b']+1}** | Similarity: `{d['similarity']}`")
+            else:
+                st.info("No near-duplicates found.")
+
+    # Ad-Hoc Text Comparison
+    st.subheader("⚖️ Compare Two Texts")
+    comp_col1, comp_col2 = st.columns(2)
+    with comp_col1:
+        text_a = st.text_area("Text A", height=100)
+    with comp_col2:
+        text_b = st.text_area("Text B", height=100)
+    if st.button("Compare") and text_a and text_b:
+        comp_result = comparator.compare(text_a, text_b)
+        sim = comp_result['similarity']
+        color = "green" if sim > 0.7 else ("orange" if sim > 0.4 else "red")
+        st.metric("Semantic Similarity", f"{sim:.2%}")
+        st.markdown(f":{color}[{'Very Similar' if sim > 0.7 else ('Moderately Similar' if sim > 0.4 else 'Dissimilar')}]")
 
     # Infrastructure & MLOps View
     st.divider()
