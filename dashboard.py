@@ -7,13 +7,16 @@ from io import BytesIO
 from fpdf import FPDF
 from src.ingestion.mock_api_connector import MockSocialMediaConnector
 from src.ingestion.reddit_connector import RedditConnector
+from src.ingestion.web_scraper import WebScraper
 from src.preprocessing.cleaner import TextCleaner
 from src.models.sentiment import SentimentAnalyzer
 from src.models.topics import TopicEngine
 from src.models.embeddings import EmbeddingGenerator
 from src.utils.vector_store import LocalVectorStore
+from src.models.search import SemanticSearchService
 from src.models.emotion import EmotionAnalyzer
 from src.models.ner import NERAnalyzer
+from src.models.classification import ZeroShotClassifier
 
 st.set_page_config(page_title="Multilingual Text Intelligence", layout="wide")
 
@@ -23,20 +26,25 @@ def load_components():
     sentiment_analyzer = SentimentAnalyzer()
     ner_analyzer = NERAnalyzer()
     emotion_analyzer = EmotionAnalyzer()
+    classification_engine = ZeroShotClassifier()
     embedding_gen = EmbeddingGenerator()
     vector_store = LocalVectorStore(dimension=384)
     search_service = SemanticSearchService(embedding_gen, vector_store)
     topic_engine = TopicEngine()
-    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, embedding_gen, vector_store, search_service, topic_engine
+    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine
 
-cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, embedding_gen, vector_store, search_service, topic_engine = load_components()
+cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, classification_engine, embedding_gen, vector_store, search_service, topic_engine = load_components()
 
 st.title("🌍 Multilingual Text Intelligence System")
 st.markdown("**English + Arabic | Transformer-Based NLP | Real-time Insights**")
 
 # Sidebar for controls
 st.sidebar.header("Data Ingestion")
-data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "Reddit Live", "CSV Upload"])
+data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "Reddit Live", "Web Scraper", "CSV Upload"])
+
+st.sidebar.header("Classification Settings")
+custom_labels = st.sidebar.text_input("Custom Labels (comma-separated)", "Policy, Technology, Economics, Social")
+labels = [l.strip() for l in custom_labels.split(",") if l.strip()]
 
 texts_df = pd.DataFrame()
 
@@ -56,6 +64,15 @@ elif data_source == "Reddit Live":
             st.sidebar.error("Reddit API credentials not found in .env!")
         else:
             data = connector.fetch_data(query=keyword, limit=num_samples)
+            texts_df = pd.DataFrame(data)
+elif data_source == "Web Scraper":
+    url = st.sidebar.text_input("Article URL")
+    if st.sidebar.button("Scrape Intelligence"):
+        connector = WebScraper()
+        data = connector.fetch_data(url=url)
+        if not data:
+            st.sidebar.warning("Failed to scrape URL or no content found.")
+        else:
             texts_df = pd.DataFrame(data)
 else:
     uploaded_file = st.sidebar.file_path_input("Choose a CSV file") # Note: streamlit doesn't have file_path_input, using file_uploader
@@ -79,6 +96,9 @@ if not texts_df.empty:
             emo_res = emotion_analyzer.analyze(clean_res['cleaned'])[0]
             ner_res = ner_analyzer.extract_entities(clean_res['cleaned'])[0]
             
+            # 4. Zero-Shot classification
+            class_res = classification_engine.classify(clean_res['cleaned'], labels)
+            
             # Simple entity list for display
             ents = [f"{e['word']} ({e['entity_group']})" for e in ner_res]
             
@@ -90,6 +110,8 @@ if not texts_df.empty:
                 "sentiment_conf": sent_res['confidence'],
                 "emotion": emo_res['emotion'],
                 "emotion_conf": emo_res['confidence'],
+                "category": class_res['label'],
+                "category_conf": class_res['score'],
                 "entities": ", ".join(ents)
             })
         
@@ -104,7 +126,7 @@ if not texts_df.empty:
         topic_results = topic_engine.fit_transform(proc_df['cleaned'].tolist())
         
     # Visualizations
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.subheader("Sentiment Distribution")
@@ -117,6 +139,11 @@ if not texts_df.empty:
         fig_lang = px.bar(proc_df['language'].value_counts().reset_index(), x='language', y='count',
                          labels={'language': 'Language', 'count': 'Count'}, color='language')
         st.plotly_chart(fig_lang, use_container_width=True)
+
+    with col3:
+        st.subheader("Category Distribution")
+        fig_cat = px.pie(proc_df, names='category', title="Custom Categories")
+        st.plotly_chart(fig_cat, use_container_width=True)
         
     col3, col4 = st.columns(2)
     with col3:

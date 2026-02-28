@@ -9,6 +9,8 @@ from src.models.embeddings import EmbeddingGenerator
 from src.models.ner import NERAnalyzer
 from src.models.emotion import EmotionAnalyzer
 
+from src.models.classification import ZeroShotClassifier
+
 app = FastAPI(title="Multilingual Text Intelligence System")
 
 # Initialize components
@@ -16,6 +18,7 @@ cleaner = TextCleaner()
 sentiment_analyzer = SentimentAnalyzer()
 ner_analyzer = NERAnalyzer()
 emotion_analyzer = EmotionAnalyzer()
+classification_engine = ZeroShotClassifier()
 embedding_gen = EmbeddingGenerator()
 # For demonstration, we use a fixed dimension (384 for MiniLM-L12-v2)
 vector_store = LocalVectorStore(dimension=384)
@@ -23,6 +26,7 @@ search_service = SemanticSearchService(embedding_gen, vector_store)
 
 class TextRequest(BaseModel):
     text: str
+    categories: Optional[List[str]] = ["Policy", "Technology", "Economics", "Social"]
 
 class TextResponse(BaseModel):
     original: str
@@ -32,6 +36,8 @@ class TextResponse(BaseModel):
     sentiment_confidence: float
     emotion: str
     emotion_confidence: float
+    category: str
+    category_confidence: float
     entities: List[Dict[str, Any]]
 
 class SearchRequest(BaseModel):
@@ -63,7 +69,10 @@ async def analyze_text(request: TextRequest):
         # 4. Extract Entities
         entities_result = ner_analyzer.extract_entities(cleaning_result['cleaned'])[0]
         
-        # 5. Ingest into vector store for search availability
+        # 5. Zero-Shot Classification
+        class_res = classification_engine.classify(cleaning_result['cleaned'], request.categories)
+        
+        # 6. Ingest into vector store for search availability
         emb = embedding_gen.generate(cleaning_result['cleaned'])
         vector_store.add(emb, [{"id": "dynamic", "text": request.text}])
         
@@ -75,6 +84,8 @@ async def analyze_text(request: TextRequest):
             "sentiment_confidence": sentiment_result['confidence'],
             "emotion": emotion_result['emotion'],
             "emotion_confidence": emotion_result['confidence'],
+            "category": class_res['label'],
+            "category_confidence": class_res['score'],
             "entities": entities_result
         }
     except Exception as e:
