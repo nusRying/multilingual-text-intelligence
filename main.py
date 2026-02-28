@@ -1,17 +1,21 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from src.preprocessing.cleaner import TextCleaner
 from src.models.sentiment import SentimentAnalyzer
 from src.utils.vector_store import LocalVectorStore
 from src.models.search import SemanticSearchService
 from src.models.embeddings import EmbeddingGenerator
+from src.models.ner import NERAnalyzer
+from src.models.emotion import EmotionAnalyzer
 
 app = FastAPI(title="Multilingual Text Intelligence System")
 
 # Initialize components
 cleaner = TextCleaner()
 sentiment_analyzer = SentimentAnalyzer()
+ner_analyzer = NERAnalyzer()
+emotion_analyzer = EmotionAnalyzer()
 embedding_gen = EmbeddingGenerator()
 # For demonstration, we use a fixed dimension (384 for MiniLM-L12-v2)
 vector_store = LocalVectorStore(dimension=384)
@@ -25,7 +29,10 @@ class TextResponse(BaseModel):
     cleaned: str
     language: str
     sentiment: str
-    confidence: float
+    sentiment_confidence: float
+    emotion: str
+    emotion_confidence: float
+    entities: List[Dict[str, Any]]
 
 class SearchRequest(BaseModel):
     query: str
@@ -45,23 +52,53 @@ async def analyze_text(request: TextRequest):
     try:
         # 1. Clean and detect language
         cleaning_result = cleaner.clean(request.text)
+        lang = cleaning_result['language']
         
-        # 2. Analyze sentiment
-        sentiment_result = sentiment_analyzer.analyze(cleaning_result['cleaned'])[0]
+        # 2. Analyze sentiment (optimized for language)
+        sentiment_result = sentiment_analyzer.analyze(cleaning_result['cleaned'], language=lang)[0]
         
-        # 3. (Optional) Ingest into vector store for search availability
+        # 3. Analyze Emotion
+        emotion_result = emotion_analyzer.analyze(cleaning_result['cleaned'])[0]
+        
+        # 4. Extract Entities
+        entities_result = ner_analyzer.extract_entities(cleaning_result['cleaned'])[0]
+        
+        # 5. Ingest into vector store for search availability
         emb = embedding_gen.generate(cleaning_result['cleaned'])
         vector_store.add(emb, [{"id": "dynamic", "text": request.text}])
         
         return {
             "original": request.text,
             "cleaned": cleaning_result['cleaned'],
-            "language": cleaning_result['language'],
+            "language": lang,
             "sentiment": sentiment_result['sentiment'],
-            "confidence": sentiment_result['confidence']
+            "sentiment_confidence": sentiment_result['confidence'],
+            "emotion": emotion_result['emotion'],
+            "emotion_confidence": emotion_result['confidence'],
+            "entities": entities_result
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze/async")
+async def analyze_text_async(request: TextRequest, background_tasks: BackgroundTasks):
+    """
+    Submits a text analysis task to be processed in the background.
+    """
+    background_tasks.add_task(process_analysis, request.text)
+    return {"message": "Task submitted successfully", "status": "processing"}
+
+async def process_analysis(text: str):
+    # This logic can be more complex, e.g., saving to a database
+    print(f"Processing background task for: {text[:50]}...")
+    try:
+        cleaning_result = cleaner.clean(text)
+        lang = cleaning_result['language']
+        sentiment_result = sentiment_analyzer.analyze(cleaning_result['cleaned'], language=lang)[0]
+        # logic to store result...
+        print(f"Background processing complete for: {text[:50]}")
+    except Exception as e:
+        print(f"Background task failed: {e}")
 
 @app.post("/search", response_model=List[SearchResult])
 async def search_documents(request: SearchRequest):
@@ -70,7 +107,6 @@ async def search_documents(request: SearchRequest):
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 if __name__ == "__main__":
     import uvicorn

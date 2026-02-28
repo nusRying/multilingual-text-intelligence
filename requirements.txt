@@ -7,4 +7,12 @@ transformers
 torch
 pytest
 python-multipart
-# Add other dependencies as needed later (e.g., faiss-cpu, bertopic)
+# Phase 2: Scalability & Performance
+pinecone-client
+onnxruntime
+optimum[exporters]
+celery
+redis
+umap-learn
+fpdf2
+praw

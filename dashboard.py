@@ -1,13 +1,19 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import numpy as np
+import umap
+from io import BytesIO
+from fpdf import FPDF
 from src.ingestion.mock_api_connector import MockSocialMediaConnector
+from src.ingestion.reddit_connector import RedditConnector
 from src.preprocessing.cleaner import TextCleaner
 from src.models.sentiment import SentimentAnalyzer
 from src.models.topics import TopicEngine
 from src.models.embeddings import EmbeddingGenerator
 from src.utils.vector_store import LocalVectorStore
-from src.models.search import SemanticSearchService
+from src.models.emotion import EmotionAnalyzer
+from src.models.ner import NERAnalyzer
 
 st.set_page_config(page_title="Multilingual Text Intelligence", layout="wide")
 
@@ -15,20 +21,22 @@ st.set_page_config(page_title="Multilingual Text Intelligence", layout="wide")
 def load_components():
     cleaner = TextCleaner()
     sentiment_analyzer = SentimentAnalyzer()
+    ner_analyzer = NERAnalyzer()
+    emotion_analyzer = EmotionAnalyzer()
     embedding_gen = EmbeddingGenerator()
     vector_store = LocalVectorStore(dimension=384)
     search_service = SemanticSearchService(embedding_gen, vector_store)
     topic_engine = TopicEngine()
-    return cleaner, sentiment_analyzer, embedding_gen, vector_store, search_service, topic_engine
+    return cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, embedding_gen, vector_store, search_service, topic_engine
 
-cleaner, sentiment_analyzer, embedding_gen, vector_store, search_service, topic_engine = load_components()
+cleaner, sentiment_analyzer, ner_analyzer, emotion_analyzer, embedding_gen, vector_store, search_service, topic_engine = load_components()
 
 st.title("🌍 Multilingual Text Intelligence System")
 st.markdown("**English + Arabic | Transformer-Based NLP | Real-time Insights**")
 
 # Sidebar for controls
 st.sidebar.header("Data Ingestion")
-data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "CSV Upload"])
+data_source = st.sidebar.selectbox("Select Data Source", ["Mock API", "Reddit Live", "CSV Upload"])
 
 texts_df = pd.DataFrame()
 
@@ -39,6 +47,16 @@ if data_source == "Mock API":
         connector = MockSocialMediaConnector()
         data = connector.fetch_data(keyword=keyword, limit=num_samples)
         texts_df = pd.DataFrame(data)
+elif data_source == "Reddit Live":
+    keyword = st.sidebar.text_input("Subreddit/Topic", "technology")
+    num_samples = st.sidebar.slider("Number of samples", 5, 50, 20)
+    if st.sidebar.button("Fetch Reddit Data"):
+        connector = RedditConnector()
+        if not connector.reddit:
+            st.sidebar.error("Reddit API credentials not found in .env!")
+        else:
+            data = connector.fetch_data(query=keyword, limit=num_samples)
+            texts_df = pd.DataFrame(data)
 else:
     uploaded_file = st.sidebar.file_path_input("Choose a CSV file") # Note: streamlit doesn't have file_path_input, using file_uploader
     # uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
@@ -52,17 +70,27 @@ if not texts_df.empty:
 
     # Processing
     with st.spinner("Processing data (cleaning, sentiment, topics)..."):
-        # 1. Cleaning & Sentiment
+        # 1. Full Pipeline Processing
         results = []
         for text in texts_df['text']:
             clean_res = cleaner.clean(text)
-            sent_res = sentiment_analyzer.analyze(clean_res['cleaned'])[0]
+            lang = clean_res['language']
+            sent_res = sentiment_analyzer.analyze(clean_res['cleaned'], language=lang)[0]
+            emo_res = emotion_analyzer.analyze(clean_res['cleaned'])[0]
+            ner_res = ner_analyzer.extract_entities(clean_res['cleaned'])[0]
+            
+            # Simple entity list for display
+            ents = [f"{e['word']} ({e['entity_group']})" for e in ner_res]
+            
             results.append({
                 "original": text,
                 "cleaned": clean_res['cleaned'],
-                "language": clean_res['language'],
+                "language": lang,
                 "sentiment": sent_res['sentiment'],
-                "confidence": sent_res['confidence']
+                "sentiment_conf": sent_res['confidence'],
+                "emotion": emo_res['emotion'],
+                "emotion_conf": emo_res['confidence'],
+                "entities": ", ".join(ents)
             })
         
         proc_df = pd.DataFrame(results)
@@ -90,9 +118,77 @@ if not texts_df.empty:
                          labels={'language': 'Language', 'count': 'Count'}, color='language')
         st.plotly_chart(fig_lang, use_container_width=True)
         
+    col3, col4 = st.columns(2)
+    with col3:
+        st.subheader("Emotion Analysis")
+        fig_emo = px.bar(proc_df['emotion'].value_counts().reset_index(), x='emotion', y='count',
+                        color='emotion', title="Detected Emotions")
+        st.plotly_chart(fig_emo, use_container_width=True)
+        
+    with col4:
+        st.subheader("Top Named Entities")
+        # Flatten and count entities
+        all_ents = []
+        for row in results:
+            if row['entities']:
+                all_ents.extend(row['entities'].split(", "))
+        if all_ents:
+            ent_counts = pd.Series(all_ents).value_counts().reset_index()
+            ent_counts.columns = ['Entity', 'Count']
+            fig_ent = px.bar(ent_counts.head(10), x='Count', y='Entity', orientation='h',
+                            color='Entity', title="Most Frequent Entities")
+            st.plotly_chart(fig_ent, use_container_width=True)
+        else:
+            st.write("No entities detected in this sample.")
+        
     st.subheader("Discovered Topics")
     topic_info = pd.DataFrame(topic_results["info"])
     st.dataframe(topic_info)
+
+    # Topic Mapping (UMAP)
+    st.subheader("Interactive Topic Map (UMAP)")
+    if len(proc_df) >= 5: # UMAP needs some data
+        with st.spinner("Generating UMAP projection..."):
+            # Get embeddings for all texts
+            embs = []
+            for text in proc_df['cleaned']:
+                embs.append(embedding_gen.generate(text).flatten())
+            embs = np.array(embs)
+            
+            # Reduce to 2D
+            reducer = umap.UMAP(n_neighbors=min(15, len(embs)-1), min_dist=0.1, n_components=2)
+            embedding_2d = reducer.fit_transform(embs)
+            
+            viz_df = pd.DataFrame(embedding_2d, columns=['x', 'y'])
+            viz_df['text'] = proc_df['original']
+            viz_df['sentiment'] = proc_df['sentiment']
+            
+            fig_umap = px.scatter(viz_df, x='x', y='y', hover_data=['text'], color='sentiment',
+                                title="Text Embedding Projection")
+            st.plotly_chart(fig_umap, use_container_width=True)
+    else:
+        st.info("Insufficient data for UMAP projection (minimum 5 samples required).")
+
+    # Export Section
+    st.subheader("📊 Export Reports")
+    col_ex1, col_ex2 = st.columns(2)
+    with col_ex1:
+        csv_data = proc_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Excel (CSV)", data=csv_data, file_name="analysis_report.csv", mime="text/csv")
+    
+    with col_ex2:
+        if st.button("📄 Generate PDF Summary"):
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.cell(200, 10, txt="Multilingual Text Intelligence Report", ln=True, align='C')
+            pdf.ln(10)
+            pdf.cell(200, 10, txt=f"Total Records: {len(proc_df)}", ln=True)
+            pdf.cell(200, 10, txt=f"Positive: {(proc_df['sentiment']=='positive').sum()}", ln=True)
+            pdf.cell(200, 10, txt=f"Negative: {(proc_df['sentiment']=='negative').sum()}", ln=True)
+            
+            pdf_output = pdf.output(dest='S').encode('latin-1')
+            st.download_button("📥 Download PDF", data=pdf_output, file_name="report.pdf", mime="application/pdf")
 
     st.subheader("Semantic Search")
     query = st.text_input("Enter query to search across languages (e.g., 'مشكلة في النظام')")
